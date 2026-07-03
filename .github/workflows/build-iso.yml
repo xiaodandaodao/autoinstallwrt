@@ -123,6 +123,10 @@ jobs:
     - name: Re-pack Hybrid ISO (Legacy + UEFI)
       run: |
         cd build
+        # 自动寻找真实的 efi.img 路径 (应对目录变化)
+        EFI_IMG_PATH=$(cd iso_root && find boot -name "efi.img" | head -n 1)
+        echo "找到的 EFI 引导文件路径: $EFI_IMG_PATH"
+        
         # 使用 xorriso 重新打包
         xorriso -as mkisofs \
           -iso-level 3 \
@@ -133,13 +137,13 @@ jobs:
           -no-emul-boot -boot-load-size 4 -boot-info-table \
           -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
           -eltorito-alt-boot \
-          -e boot/syslinux/efi.img \
+          -e "$EFI_IMG_PATH" \
           -no-emul-boot -isohybrid-gpt-basdat \
           -output immortalwrt-auto-install.iso \
           iso_root/
 
     - name: Upload ISO Artifact
-      uses: Actions/upload-artifact@v4
+      uses: actions/upload-artifact@v4
       with:
         name: immortalwrt-24.10.6-auto-install-iso
         path: build/immortalwrt-auto-install.iso
