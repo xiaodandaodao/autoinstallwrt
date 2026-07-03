@@ -23,7 +23,6 @@ jobs:
         mkdir -p build && cd build
         
         # 1. 下载 ImmortalWrt 24.10 稳定版 x86_64 EXT4-EFI 镜像
-        # 24.10 的最新稳定版目录结构和文件名已更新
         IMRT_URL="https://downloads.immortalwrt.org/releases/24.10.0/targets/x86/64/immortalwrt-24.10.0-x86-64-generic-ext4-combined-efi.img.gz"
         echo "正在下载 ImmortalWrt 24.10 固件..."
         wget -q $IMRT_URL -O immortalwrt.img.gz
@@ -42,7 +41,7 @@ jobs:
         xorriso -osirrox on -indev alpine.iso -extract / iso_root
         chmod -R +w iso_root
         
-        # 将解压出来的 ImmortalWrt 24.10 镜像塞入 ISO 的数据区，改个简单好记的名字
+        # 将解压出来的 ImmortalWrt 24.10 镜像塞入 ISO 的数据区
         mv immortalwrt-24.10.0-x86-64-generic-ext4-combined-efi.img iso_root/immortalwrt.img
         
         # 【核心逻辑】：编写一键盲刷的自动化 Shell 脚本
@@ -55,7 +54,6 @@ jobs:
         echo ""
         
         # 1. 智能识别目标硬盘：排除当前的 USB 安装盘
-        # 优先寻找 nvme 固态硬盘，其次寻找 sda 等 sata 硬盘
         TARGET_DISK=""
         
         # 获取所有非 USB 的块设备
@@ -63,7 +61,7 @@ jobs:
             # 确保是物理磁盘而不是分区
             if [ -b "/dev/$disk" ]; then
                 TARGET_DISK=$disk
-                # 如果发现了 NVMe 固态，直接锁定（通常作为系统盘优先）
+                # 如果发现了 NVMe 固态，直接锁定
                 echo $disk | grep -q 'nvme' && break
             fi
         done
@@ -103,7 +101,7 @@ jobs:
         mkdir initfs && cd initfs
         zcat ../initramfs-lts | cpio -idmv
         
-        # 修改其中的 init 核心脚本：在它挂载完 CDROM 之后，强行拦截并执行我们的自动刷机脚本
+        # 修改其中的 init 核心脚本
         sed -i '/echo "Alpine_Init_Complete"/i \
         if [ -f /media/cdrom/auto_install.sh ]; then \
             sh /media/cdrom/auto_install.sh \
@@ -116,7 +114,7 @@ jobs:
     - name: Re-pack Hybrid ISO (Legacy + UEFI)
       run: |
         cd build
-        # 使用 xorriso 重新打包，生成完美支持传统 BIOS 和现代 UEFI 引导的混合 ISO
+        # 使用 xorriso 重新打包
         xorriso -as mkisofs \
           -iso-level 3 \
           -full-iso9660-filenames \
@@ -132,7 +130,7 @@ jobs:
           iso_root/
 
     - name: Upload ISO Artifact
-      uses: actions/artifacts@v4
+      uses: actions/upload-artifact@v4
       with:
         name: immortalwrt-24.10-auto-install-iso
         path: build/immortalwrt-auto-install.iso
