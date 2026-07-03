@@ -1,4 +1,4 @@
-name: Build ImmortalWrt 24.10 Auto-Install ISO
+name: Build ImmortalWrt 24.10.6 Auto-Install ISO
 
 on:
   workflow_dispatch: # 支持手动触发编译
@@ -18,20 +18,22 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y xorriso squashfs-tools wget isolinux cpio
 
-    - name: Download ImmortalWrt 24.10 & Alpine ISO
+    - name: Download ImmortalWrt 24.10.6 & Alpine ISO
       run: |
         mkdir -p build && cd build
         
-        # 1. 下载 ImmortalWrt 24.10 稳定版 x86_64 EXT4-EFI 镜像
-        IMRT_URL="https://downloads.immortalwrt.org/releases/24.10.0/targets/x86/64/immortalwrt-24.10.0-x86-64-generic-ext4-combined-efi.img.gz"
-        echo "正在下载 ImmortalWrt 24.10 固件..."
-        wget -q $IMRT_URL -O immortalwrt.img.gz
+        # 1. 下载 ImmortalWrt 24.10.6 稳定版 x86_64 EXT4-EFI 镜像
+        IMRT_URL="https://downloads.immortalwrt.org/releases/24.10.6/targets/x86/64/immortalwrt-24.10.6-x86-64-generic-ext4-combined-efi.img.gz"
+        echo "正在下载 ImmortalWrt 24.10.6 固件..."
+        wget $IMRT_URL -O immortalwrt.img.gz
+        
+        echo "正在解压固件..."
         gunzip immortalwrt.img.gz
         
         # 2. 下载轻量级 Alpine Linux Standard ISO 作为引导底盘
         ALPINE_URL="https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/alpine-standard-3.19.1-x86_64.iso"
         echo "正在下载 Alpine 引导镜像..."
-        wget -q $ALPINE_URL -O alpine.iso
+        wget $ALPINE_URL -O alpine.iso
 
     - name: Extract and Modify ISO
       run: |
@@ -41,15 +43,15 @@ jobs:
         xorriso -osirrox on -indev alpine.iso -extract / iso_root
         chmod -R +w iso_root
         
-        # 将解压出来的 ImmortalWrt 24.10 镜像塞入 ISO 的数据区
-        mv immortalwrt-24.10.0-x86-64-generic-ext4-combined-efi.img iso_root/immortalwrt.img
+        # 将解压出来的 ImmortalWrt 24.10.6 镜像塞入 ISO 的数据区，并规范命名
+        mv immortalwrt-24.10.6-x86-64-generic-ext4-combined-efi.img iso_root/immortalwrt.img
         
         # 【核心逻辑】：编写一键盲刷的自动化 Shell 脚本
         cat << 'EOF' > iso_root/auto_install.sh
         #!/bin/sh
         clear
         echo "===================================================="
-        echo "   欢迎使用 ImmortalWrt 24.10 物理机自动安装系统"
+        echo "   欢迎使用 ImmortalWrt 24.10.6 物理机自动安装系统"
         echo "===================================================="
         echo ""
         
@@ -74,7 +76,7 @@ jobs:
         fi
 
         echo "----> [ 发现目标硬盘 ] : /dev/$TARGET_DISK"
-        echo "----> [ 警告 ] : 5秒后将清除该硬盘所有数据并写入 ImmortalWrt 24.10！"
+        echo "----> [ 警告 ] : 5秒后将清除该硬盘所有数据并写入 ImmortalWrt 24.10.6！"
         sleep 5
         
         echo "----> 正在写入镜像，请勿拔掉 U 盘或断电..."
@@ -132,5 +134,5 @@ jobs:
     - name: Upload ISO Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: immortalwrt-24.10-auto-install-iso
+        name: immortalwrt-24.10.6-auto-install-iso
         path: build/immortalwrt-auto-install.iso
