@@ -32,7 +32,8 @@ jobs:
       run: |
         cd build
         echo "正在解压固件..."
-        gunzip immortalwrt.img.gz
+        # 允许 gzip 抛出状态码 2（即允许忽略尾部多余数据的警告）
+        gunzip immortalwrt.img.gz || [ $? -eq 2 ]
 
     - name: Download Alpine ISO Base
       run: |
@@ -49,7 +50,7 @@ jobs:
         xorriso -osirrox on -indev alpine.iso -extract / iso_root
         chmod -R +w iso_root
         
-        # 修复此处的重命名逻辑：直接将刚才解压出来的 immortalwrt.img 移动并改名
+        # 将刚才成功解压出来的镜像移动到 ISO 目录中
         mv immortalwrt.img iso_root/immortalwrt.img
         
         # 【核心逻辑】：编写一键盲刷的自动化 Shell 脚本
@@ -138,7 +139,7 @@ jobs:
           iso_root/
 
     - name: Upload ISO Artifact
-      uses: actions/upload-artifact@v4
+      uses: Actions/upload-artifact@v4
       with:
         name: immortalwrt-24.10.6-auto-install-iso
         path: build/immortalwrt-auto-install.iso
