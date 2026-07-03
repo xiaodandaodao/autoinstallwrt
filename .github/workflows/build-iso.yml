@@ -1,9 +1,12 @@
 name: Build ImmortalWrt 24.10.6 Auto-Install ISO
 
 on:
-  workflow_dispatch: # 支持手动触发编译
+  workflow_dispatch:
   schedule:
-    - cron: '0 0 1 * *' # 每月1号自动运行更新
+    - cron: '0 0 1 * *'
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -32,7 +35,6 @@ jobs:
       run: |
         cd build
         echo "正在解压固件..."
-        # 允许 gzip 抛出状态码 2（即允许忽略尾部多余数据的警告）
         gunzip immortalwrt.img.gz || [ $? -eq 2 ]
 
     - name: Download Alpine ISO Base
@@ -42,92 +44,130 @@ jobs:
         echo "正在下载 Alpine 引导镜像..."
         wget --tries=3 --timeout=20 "$ALPINE_URL" -O alpine.iso
 
-    - name: Extract and Modify ISO
+    - name: Extract Alpine ISO
       run: |
         cd build
-        # 解压 Alpine ISO 内容
         mkdir iso_root
         xorriso -osirrox on -indev alpine.iso -extract / iso_root
         chmod -R +w iso_root
-        
-        # 将刚才成功解压出来的镜像移动到 ISO 目录中
+        # 将镜像放到 ISO 根目录
         mv immortalwrt.img iso_root/immortalwrt.img
+
+    - name: Create Auto-Install Overlay (APKOVL)
+      run: |
+        cd build
+        mkdir -p overlay/etc
         
-        # 【核心逻辑】：编写一键盲刷的自动化 Shell 脚本
-        cat << 'EOF' > iso_root/auto_install.sh
+        # 1. 覆写 inittab，劫持登录界面，让系统开机直接在屏幕上运行我们的脚本
+        cat << 'EOF' > overlay/etc/inittab
+        ::sysinit:/sbin/openrc sysinit
+        ::sysinit:/sbin/openrc boot
+        ::wait:/sbin/openrc default
+        
+        # 核心：用我们的安装脚本替换默认的 getty 登录提示
+        tty1::respawn:/bin/sh /etc/auto_install.sh
+        tty2::respawn:/sbin/getty 38400 tty2
+        tty3::respawn:/sbin/getty 38400 tty3
+        
+        ::ctrlaltdel:/sbin/reboot
+        ::shutdown:/sbin/openrc shutdown
+        EOF
+        
+        # 2. 编写全宇宙最稳的盲刷脚本（带颜色UI和底层磁盘识别）
+        cat << 'EOF' > overlay/etc/auto_install.sh
         #!/bin/sh
+        # 等待2秒确保内核日志输出完毕
+        sleep 2
         clear
-        echo "===================================================="
-        echo "   欢迎使用 ImmortalWrt 24.10.6 物理机自动安装系统"
-        echo "===================================================="
+        echo -e "\033[36m====================================================\033[0m"
+        echo -e "\033[32m   欢迎使用 ImmortalWrt 24.10.6 物理机自动安装系统\033[0m"
+        echo -e "\033[36m====================================================\033[0m"
         echo ""
         
-        # 1. 智能识别目标硬盘：排除当前的 USB 安装盘
-        TARGET_DISK=""
-        
-        # 获取所有非 USB 的块设备
-        for disk in $(lsblk -dno NAME,TRAN | grep -v 'usb' | awk '{print $1}'); do
-            # 确保是物理磁盘而不是分区
-            if [ -b "/dev/$disk" ]; then
-                TARGET_DISK=$disk
-                # 如果发现了 NVMe 固态，直接锁定
-                echo $disk | grep -q 'nvme' && break
+        # 智能寻找安装镜像的位置
+        IMG_PATH=""
+        for mnt in /media/cdrom /media/usb; do
+            if [ -f "$mnt/immortalwrt.img" ]; then
+                IMG_PATH="$mnt/immortalwrt.img"
+                break
             fi
         done
-
-        if [ -z "$TARGET_DISK" ]; then
-            echo "❌ 错误：未找到有效的本地固态硬盘/机械硬盘！"
-            echo "系统将在 15 秒后关机。请检查物理机是否插好硬盘。"
-            sleep 15
-            poweroff -f
+        
+        if [ -z "$IMG_PATH" ]; then
+            echo -e "\033[31m❌ 错误：在启动盘中未找到 immortalwrt.img 镜像文件！\033[0m"
+            sleep 3600
         fi
 
-        echo "----> [ 发现目标硬盘 ] : /dev/$TARGET_DISK"
-        echo "----> [ 警告 ] : 5秒后将清除该硬盘所有数据并写入 ImmortalWrt 24.10.6！"
+        # 底层智能寻找本地物理硬盘（完美兼容精简版环境，排除 U盘、光驱、内存盘）
+        TARGET_DISK=""
+        for dev in /sys/block/*; do
+            [ ! -e "$dev" ] && continue
+            b=$(basename $dev)
+            
+            # 过滤不需要的设备
+            echo "$b" | grep -q "^loop" && continue
+            echo "$b" | grep -q "^ram" && continue
+            echo "$b" | grep -q "^sr" && continue
+            echo "$b" | grep -q "^fd" && continue
+            
+            # 通过 sysfs 物理路径判断是否为 USB 设备，如果是则跳过（防止把自己给刷了）
+            if readlink -f "$dev" | grep -q "usb"; then
+                continue
+            fi
+            
+            # 如果是有效的物理盘
+            TARGET_DISK=$b
+            # 如果是 NVMe，优先度最高，直接锁定并跳出循环
+            if echo "$b" | grep -q "^nvme"; then
+                break
+            fi
+        done
+        
+        if [ -z "$TARGET_DISK" ]; then
+            echo -e "\033[31m❌ 错误：未找到有效的本地固态硬盘/机械硬盘！\033[0m"
+            echo "请检查物理机（或虚拟机）是否正确分配了硬盘。"
+            echo "系统将在 30 秒后关机..."
+            sleep 30
+            poweroff -f
+            exit 1
+        fi
+        
+        echo -e "----> \033[32m[ 发现目标硬盘 ] : /dev/$TARGET_DISK\033[0m"
+        echo -e "----> \033[31m[ 警告 ] : 5秒后将清除该硬盘所有数据并写入 ImmortalWrt！\033[0m"
         sleep 5
         
-        echo "----> 正在写入镜像，请勿拔掉 U 盘或断电..."
+        echo -e "----> \033[33m正在写入镜像，大约需要 10-20 秒，请勿断电...\033[0m"
         echo "===================================================="
+        
         # 灌盘
-        dd if=/media/cdrom/immortalwrt.img of=/dev/$TARGET_DISK bs=4M status=progress
+        dd if="$IMG_PATH" of=/dev/$TARGET_DISK bs=4M
         sync
         
         echo "===================================================="
-        echo "   🎉 写入成功！"
-        echo "   系统将在 5 秒后自动关机。"
-        echo "   【重要提示】: 请在黑屏关机后拔掉 U 盘，再重新开机！"
+        echo -e "\033[32m   🎉 写入成功！\033[0m"
+        echo -e "\033[33m   系统将在 5 秒后自动关机。\033[0m"
+        echo -e "\033[31m   【重要提示】: 请在黑屏关机后拔掉 U 盘，再重新开机！\033[0m"
         echo "===================================================="
         sleep 5
         poweroff -f
+        
+        # 挂起当前 shell，等待系统真正断电
+        sleep 3600
         EOF
         
-        chmod +x iso_root/auto_install.sh
-
-    - name: Hook into Alpine Boot (Inject Initramfs)
-      run: |
-        cd build/iso_root/boot
-        # 解压 Alpine 的引导内存盘 (initramfs)
-        mkdir initfs && cd initfs
-        zcat ../initramfs-lts | cpio -idmv
+        chmod +x overlay/etc/auto_install.sh
         
-        # 修改其中的 init 核心脚本
-        sed -i '/echo "Alpine_Init_Complete"/i \
-        if [ -f /media/cdrom/auto_install.sh ]; then \
-            sh /media/cdrom/auto_install.sh \
-        fi' init
-        
-        # 重新打包回 initramfs
-        find . | cpio -H newc -o | gzip -9 > ../initramfs-lts
-        cd .. && rm -rf initfs
+        # 3. 压制为 apkovl 并放入 ISO 根目录（Alpine 的标准玩法）
+        cd overlay
+        tar -czvf ../iso_root/localhost.apkovl.tar.gz *
+        cd ..
+        rm -rf overlay
 
     - name: Re-pack Hybrid ISO (Legacy + UEFI)
       run: |
         cd build
-        # 自动寻找真实的 efi.img 路径 (应对目录变化)
         EFI_IMG_PATH=$(cd iso_root && find boot -name "efi.img" | head -n 1)
-        echo "找到的 EFI 引导文件路径: $EFI_IMG_PATH"
         
-        # 使用 xorriso 重新打包
         xorriso -as mkisofs \
           -iso-level 3 \
           -full-iso9660-filenames \
@@ -142,8 +182,18 @@ jobs:
           -output immortalwrt-auto-install.iso \
           iso_root/
 
-    - name: Upload ISO Artifact
-      uses: actions/upload-artifact@v4
+    - name: Create GitHub Release and Upload ISO
+      uses: softprops/action-gh-release@v2
       with:
-        name: immortalwrt-24.10.6-auto-install-iso
-        path: build/immortalwrt-auto-install.iso
+        tag_name: v24.10.6-build${{ github.run_number }}
+        name: ImmortalWrt 24.10.6 自动盲刷引导镜像 (Build ${{ github.run_number }})
+        body: |
+          ### 💿 固件信息
+          - **固件版本**: ImmortalWrt 24.10.6 官方标准版
+          - **编译方案**: 基于 Alpine Linux APKOVL 覆盖机制，原生稳定。
+          - **自动化逻辑**: 智能排除 USB 启动盘，底层 `sysfs` 锁定 NVMe/SATA 硬盘盲刷。
+        draft: false
+        prerelease: false
+        files: build/immortalwrt-auto-install.iso
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
