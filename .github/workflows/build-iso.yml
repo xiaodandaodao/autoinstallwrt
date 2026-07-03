@@ -1,0 +1,138 @@
+name: Build ImmortalWrt 24.10 Auto-Install ISO
+
+on:
+  workflow_dispatch: # 支持手动触发编译
+  schedule:
+    - cron: '0 0 1 * *' # 每月1号自动运行更新
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y xorriso squashfs-tools wget isolinux cpio
+
+    - name: Download ImmortalWrt 24.10 & Alpine ISO
+      run: |
+        mkdir -p build && cd build
+        
+        # 1. 下载 ImmortalWrt 24.10 稳定版 x86_64 EXT4-EFI 镜像
+        # 24.10 的最新稳定版目录结构和文件名已更新
+        IMRT_URL="https://downloads.immortalwrt.org/releases/24.10.0/targets/x86/64/immortalwrt-24.10.0-x86-64-generic-ext4-combined-efi.img.gz"
+        echo "正在下载 ImmortalWrt 24.10 固件..."
+        wget -q $IMRT_URL -O immortalwrt.img.gz
+        gunzip immortalwrt.img.gz
+        
+        # 2. 下载轻量级 Alpine Linux Standard ISO 作为引导底盘
+        ALPINE_URL="https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/alpine-standard-3.19.1-x86_64.iso"
+        echo "正在下载 Alpine 引导镜像..."
+        wget -q $ALPINE_URL -O alpine.iso
+
+    - name: Extract and Modify ISO
+      run: |
+        cd build
+        # 解压 Alpine ISO 内容
+        mkdir iso_root
+        xorriso -osirrox on -indev alpine.iso -extract / iso_root
+        chmod -R +w iso_root
+        
+        # 将解压出来的 ImmortalWrt 24.10 镜像塞入 ISO 的数据区，改个简单好记的名字
+        mv immortalwrt-24.10.0-x86-64-generic-ext4-combined-efi.img iso_root/immortalwrt.img
+        
+        # 【核心逻辑】：编写一键盲刷的自动化 Shell 脚本
+        cat << 'EOF' > iso_root/auto_install.sh
+        #!/bin/sh
+        clear
+        echo "===================================================="
+        echo "   欢迎使用 ImmortalWrt 24.10 物理机自动安装系统"
+        echo "===================================================="
+        echo ""
+        
+        # 1. 智能识别目标硬盘：排除当前的 USB 安装盘
+        # 优先寻找 nvme 固态硬盘，其次寻找 sda 等 sata 硬盘
+        TARGET_DISK=""
+        
+        # 获取所有非 USB 的块设备
+        for disk in $(lsblk -dno NAME,TRAN | grep -v 'usb' | awk '{print $1}'); do
+            # 确保是物理磁盘而不是分区
+            if [ -b "/dev/$disk" ]; then
+                TARGET_DISK=$disk
+                # 如果发现了 NVMe 固态，直接锁定（通常作为系统盘优先）
+                echo $disk | grep -q 'nvme' && break
+            fi
+        done
+
+        if [ -z "$TARGET_DISK" ]; then
+            echo "❌ 错误：未找到有效的本地固态硬盘/机械硬盘！"
+            echo "系统将在 15 秒后关机。请检查物理机是否插好硬盘。"
+            sleep 15
+            poweroff -f
+        fi
+
+        echo "----> [ 发现目标硬盘 ] : /dev/$TARGET_DISK"
+        echo "----> [ 警告 ] : 5秒后将清除该硬盘所有数据并写入 ImmortalWrt 24.10！"
+        sleep 5
+        
+        echo "----> 正在写入镜像，请勿拔掉 U 盘或断电..."
+        echo "===================================================="
+        # 灌盘
+        dd if=/media/cdrom/immortalwrt.img of=/dev/$TARGET_DISK bs=4M status=progress
+        sync
+        
+        echo "===================================================="
+        echo "   🎉 写入成功！"
+        echo "   系统将在 5 秒后自动关机。"
+        echo "   【重要提示】: 请在黑屏关机后拔掉 U 盘，再重新开机！"
+        echo "===================================================="
+        sleep 5
+        poweroff -f
+        EOF
+        
+        chmod +x iso_root/auto_install.sh
+
+    - name: Hook into Alpine Boot (Inject Initramfs)
+      run: |
+        cd build/iso_root/boot
+        # 解压 Alpine 的引导内存盘 (initramfs)
+        mkdir initfs && cd initfs
+        zcat ../initramfs-lts | cpio -idmv
+        
+        # 修改其中的 init 核心脚本：在它挂载完 CDROM 之后，强行拦截并执行我们的自动刷机脚本
+        sed -i '/echo "Alpine_Init_Complete"/i \
+        if [ -f /media/cdrom/auto_install.sh ]; then \
+            sh /media/cdrom/auto_install.sh \
+        fi' init
+        
+        # 重新打包回 initramfs
+        find . | cpio -H newc -o | gzip -9 > ../initramfs-lts
+        cd .. && rm -rf initfs
+
+    - name: Re-pack Hybrid ISO (Legacy + UEFI)
+      run: |
+        cd build
+        # 使用 xorriso 重新打包，生成完美支持传统 BIOS 和现代 UEFI 引导的混合 ISO
+        xorriso -as mkisofs \
+          -iso-level 3 \
+          -full-iso9660-filenames \
+          -volid "IMRT_AUTO" \
+          -eltorito-boot boot/syslinux/isolinux.bin \
+          -eltorito-catalog boot/syslinux/boot.cat \
+          -no-emul-boot -boot-load-size 4 -boot-info-table \
+          -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
+          -eltorito-alt-boot \
+          -e boot/syslinux/efi.img \
+          -no-emul-boot -isohybrid-gpt-basdat \
+          -output immortalwrt-auto-install.iso \
+          iso_root/
+
+    - name: Upload ISO Artifact
+      uses: actions/artifacts@v4
+      with:
+        name: immortalwrt-24.10-auto-install-iso
+        path: build/immortalwrt-auto-install.iso
