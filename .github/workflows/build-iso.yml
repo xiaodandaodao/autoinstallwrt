@@ -18,22 +18,28 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y xorriso squashfs-tools wget isolinux cpio
 
-    - name: Download ImmortalWrt 24.10.6 & Alpine ISO
+    - name: Create Build Workspace
+      run: mkdir -p build
+
+    - name: Download ImmortalWrt 24.10.6 Firmware
       run: |
-        mkdir -p build && cd build
-        
-        # 1. 下载 ImmortalWrt 24.10.6 稳定版 x86_64 EXT4-EFI 镜像
+        cd build
         IMRT_URL="https://downloads.immortalwrt.org/releases/24.10.6/targets/x86/64/immortalwrt-24.10.6-x86-64-generic-ext4-combined-efi.img.gz"
         echo "正在下载 ImmortalWrt 24.10.6 固件..."
-        wget $IMRT_URL -O immortalwrt.img.gz
-        
+        wget --tries=3 --timeout=20 "$IMRT_URL" -O immortalwrt.img.gz
+
+    - name: Unzip Firmware Image
+      run: |
+        cd build
         echo "正在解压固件..."
         gunzip immortalwrt.img.gz
-        
-        # 2. 下载轻量级 Alpine Linux Standard ISO 作为引导底盘
+
+    - name: Download Alpine ISO Base
+      run: |
+        cd build
         ALPINE_URL="https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/alpine-standard-3.19.1-x86_64.iso"
         echo "正在下载 Alpine 引导镜像..."
-        wget $ALPINE_URL -O alpine.iso
+        wget --tries=3 --timeout=20 "$ALPINE_URL" -O alpine.iso
 
     - name: Extract and Modify ISO
       run: |
@@ -43,8 +49,8 @@ jobs:
         xorriso -osirrox on -indev alpine.iso -extract / iso_root
         chmod -R +w iso_root
         
-        # 将解压出来的 ImmortalWrt 24.10.6 镜像塞入 ISO 的数据区，并规范命名
-        mv immortalwrt-24.10.6-x86-64-generic-ext4-combined-efi.img iso_root/immortalwrt.img
+        # 修复此处的重命名逻辑：直接将刚才解压出来的 immortalwrt.img 移动并改名
+        mv immortalwrt.img iso_root/immortalwrt.img
         
         # 【核心逻辑】：编写一键盲刷的自动化 Shell 脚本
         cat << 'EOF' > iso_root/auto_install.sh
